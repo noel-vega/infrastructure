@@ -1,0 +1,121 @@
+# Infrastructure Services - Traefik Reverse Proxy + Docker Registry
+# Deploy once on your VPS, shared across all applications
+#
+# Prerequisites:
+#   Create .env file with required variables (see .env.example)
+#
+# Usage:
+#   docker-compose up -d
+#
+# Login to registry:
+#   docker login registry.noelvega.dev
+
+services:
+  # Traefik - Reverse proxy with automatic SSL
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      # Docker provider configuration
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=traefik"
+      
+      # Entrypoints (HTTP and HTTPS)
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      
+      # Global HTTP to HTTPS redirect
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      
+      # Let's Encrypt configuration
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      
+      # Logging
+      - "--log.level=INFO"
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      # Docker socket (read-only for security)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Let's Encrypt certificates persistence
+      - traefik-letsencrypt:/letsencrypt
+
+    networks:
+      - traefik
+
+  # Docker Registry - Private container registry
+  registry:
+    image: registry:2
+    container_name: docker-registry
+    restart: unless-stopped
+    environment:
+      # Basic auth configuration
+      REGISTRY_AUTH: htpasswd
+      REGISTRY_AUTH_HTPASSWD_REALM: Registry Realm
+      REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd
+      
+      # Storage configuration
+      REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /var/lib/registry
+      
+    volumes:
+      # Registry data persistence
+      - registry-data:/var/lib/registry
+      # Basic auth credentials file
+      - registry-auth:/auth:ro
+    
+    networks:
+      - traefik
+    
+    labels:
+      # Enable Traefik
+      - "traefik.enable=true"
+      
+      # HTTPS router with Let's Encrypt
+      - "traefik.http.routers.registry.rule=Host(`${REGISTRY_DOMAIN}`)"
+      - "traefik.http.routers.registry.entrypoints=websecure"
+      - "traefik.http.routers.registry.tls=true"
+      - "traefik.http.routers.registry.tls.certresolver=letsencrypt"
+      
+      # Service configuration
+      - "traefik.http.services.registry.loadbalancer.server.port=5000"
+    
+    depends_on:
+      - registry-auth-setup
+
+  # Helper service to create htpasswd file from environment variables
+  # This runs once and exits after creating the auth file
+  registry-auth-setup:
+    image: httpd:2.4-alpine
+    container_name: registry-auth-setup
+    restart: "no"
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        # Create htpasswd file with credentials from environment
+        htpasswd -Bbn ${REGISTRY_USERNAME} ${REGISTRY_PASSWORD} > /auth/htpasswd
+        echo "Registry auth file created successfully"
+    volumes:
+      - registry-auth:/auth
+
+networks:
+  traefik:
+    name: traefik
+    driver: bridge
+
+volumes:
+  traefik-letsencrypt:
+    driver: local
+  registry-data:
+    driver: local
+  registry-auth:
+    driver: local
